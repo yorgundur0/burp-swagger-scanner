@@ -1,42 +1,95 @@
-# Burp Swagger Scanner
+# Dynamic Swagger Scanner
 
-This Burp Suite extension automatically discovers Swagger (OpenAPI) documentation endpoints during passive scans (analyzing each host only once) and reports them as custom issues. Issues appear in the **Issues** or **Live Issues** tab with medium severity and clear remediation advice.  
+This Burp Suite extension performs **passive scanning** to locate publicly accessible Swagger (OpenAPI) documentation. Once discovered, it flags the domain with a custom security issue labeled “Swagger Endpoint Found” or “Possible Swagger Documentation Found.” The extension uses a **single pass** approach per host, preventing repeated checks and infinite path nesting.
 
 ## Features
 
-- **Single Parse per Host**  
-  Analyzes each host only once for Swagger/OpenAPI JSON or documentation during passive scans.
-- **Custom Issue Reporting**  
-  Flags “Swagger Endpoint Found” or “Possible Swagger Documentation Found,” with medium severity.
-- **Confidence & Visibility**  
-  Uses `getConfidence()` = `"Certain"` and a non-zero `getIssueType()`, ensuring findings are visible in Live Issues.
+- **Passive Scanner**  
+  Implements `IBurpExtender` and `IScannerCheck` with `doPassiveScan()` to passively discover Swagger files.
+- **One-Time Parsing**  
+  Tracks whether Swagger has been found for a given host, avoiding repeated scans or loops.
 - **Remediation Advice**  
-  Advises users to restrict or remove public Swagger documentation for better security.
+  Adds medium-severity issues with suggestions to restrict or remove sensitive Swagger endpoints.
 
 ## Installation
 
-1. **Download**  
-   Clone or download this repository, then locate the `swagger-scanner.py` file.
+1. **Obtain**  
+   Download the `swagger-scanner.py` file from this repository or your local source.
 2. **Load into Burp**  
-   - Go to **Extender** → **Extensions** → **Add**  
+   - Open **Extender** → **Extensions** → **Add**  
    - Select **Extension type** = **Python** and choose `swagger-scanner.py`
-3. **Configuration**  
-   Ensure Jython standalone is configured in Burp if necessary. Check **Extender** → **Extensions** → **Output** for logs.
+3. **Confirm Setup**  
+   - If using Python-based extensions, verify Jython is configured.  
+   - Watch **Extender** → **Extensions** → **Output** for logs or errors.
 
 ## Usage
 
-1. **Passive Scan**  
-   Start Burp’s passive scanning (e.g., by proxying traffic). For each new host, the extension attempts to parse Swagger paths once.
-2. **Issues Tab**  
-   Swagger docs discovered are reported as custom medium-severity issues with “Certain” confidence.
+1. **Enable Passive Scanning**  
+   Start a normal crawl or browse through Burp Proxy. Each new host is parsed once in the background.
+2. **Check Issues**  
+   Found Swagger docs appear in **Issues** (Live Issues) with “Medium” severity and “Certain” confidence.
 3. **Remediation**  
-   Remove or restrict access to these docs. Use authentication, IP whitelisting, or remove them from production altogether.
+   Limit or remove public access to discovered Swagger files. Use authentication, IP restrictions, or remove from production.
 
-## License
+## Code Snippet
 
-```text
-MIT License
+```python
+from burp import IBurpExtender, IScannerCheck, IScanIssue
+from java.net import URL
+from array import array
+import json
+import threading
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software") ...
-(Include full MIT text here)
+class BurpExtender(IBurpExtender, IScannerCheck):
+    def registerExtenderCallbacks(self, callbacks):
+        self._callbacks = callbacks
+        self._helpers = callbacks.getHelpers()
+        self.extension_name = "Dynamic Swagger Scanner (Passive Scan)"
+        self._callbacks.setExtensionName(self.extension_name)
+        self._callbacks.registerScannerCheck(self)
+        self.found_swaggers = set()
+        self.no_swagger_paths = set()
+        self.lock = threading.RLock()
+
+    def doPassiveScan(self, baseRequestResponse):
+        analyzed_req = self._helpers.analyzeRequest(baseRequestResponse)
+        host = analyzed_req.getUrl().getHost()
+        path = analyzed_req.getUrl().getPath() or "/"
+        with self.lock:
+            if host in self.found_swaggers:
+                return None
+            if (host, path) in self.no_swagger_paths:
+                return None
+            self.try_parse_swagger_with_path(baseRequestResponse, host, path)
+        return None
+
+    def doActiveScan(self, baseRequestResponse, insertionPoint):
+        return []
+
+    def try_parse_swagger_with_path(self, baseRequestResponse, host, path):
+        # ...
+        # (shortened for brevity)
+        pass
+
+    def create_issue_manual(self, baseRequestResponse, full_url, issue_name, issue_detail, severity):
+        # ...
+        pass
+
+    def fetch_url(self, url):
+        # ...
+        pass
+
+    def parse_swagger(self, swagger_data):
+        # ...
+        pass
+
+    def is_json(self, txt):
+        # ...
+        pass
+
+    def consolidateDuplicateIssues(self, existingIssue, newIssue):
+        return 0
+
+class CustomScanIssue(IScanIssue):
+    # ...
+    pass
