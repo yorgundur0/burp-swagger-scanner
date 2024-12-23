@@ -1,69 +1,34 @@
-# -*- coding: utf-8 -*-
 from burp import IBurpExtender, IScannerCheck, IScanIssue
 from java.net import URL
+from array import array
 import json
+import threading
 
 class BurpExtender(IBurpExtender, IScannerCheck):
     def registerExtenderCallbacks(self, callbacks):
-        # Integration with Burp API
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
-        self._callbacks.setExtensionName("Dynamic Swagger Scanner")
-
-        # Register the plugin to ScannerCheck
+        self.extension_name = "Dynamic Swagger Scanner"
+        self._callbacks.setExtensionName(self.extension_name)
         self._callbacks.registerScannerCheck(self)
-
-        # To store Swagger endpoints
         self.swagger_endpoints = {}
-
-        # List that tracks issues created for duplicate issue control
-        self.created_issues = []
+        self.parsed_hosts = set()
+        self.lock = threading.RLock()
 
     def doPassiveScan(self, baseRequestResponse):
         analyzed_request = self._helpers.analyzeRequest(baseRequestResponse)
         host = analyzed_request.getUrl().getHost()
-
-        # Check if Swagger JSON is crawled
-        if host not in self.swagger_endpoints:
-            self.find_and_parse_swagger(host)
-
-        # Check if there are any matches during passive scanning
-        url = analyzed_request.getUrl().toString()
-        if host in self.swagger_endpoints:
-            for endpoint in self.swagger_endpoints[host]:
-                if endpoint["path"] in url:
-                    return [self.create_issue(baseRequestResponse, endpoint["path"], "Passive Swagger Scan")]
-
+        with self.lock:
+            if host not in self.parsed_hosts:
+                self.parsed_hosts.add(host)
+                self.find_and_parse_swagger(host)
         return None
 
     def doActiveScan(self, baseRequestResponse, insertionPoint):
-        analyzed_request = self._helpers.analyzeRequest(baseRequestResponse)
-        host = analyzed_request.getUrl().getHost()
+        return []
 
-        # Scan if Swagger endpoints are not present
-        if host not in self.swagger_endpoints:
-            self.find_and_parse_swagger(host)
-
-        # Test Swagger endpoints during active scanning
-        issues = []
-        if host in self.swagger_endpoints:
-            for endpoint in self.swagger_endpoints[host]:
-                payload = 'test_payload_for_{}'.format(endpoint["path"])
-                attack_request = insertionPoint.buildRequest(payload.encode())
-                attack_response = self._callbacks.makeHttpRequest(
-                    baseRequestResponse.getHttpService(), attack_request
-                )
-
-                # Yanıtta belirli bir anahtar kelimeyi kontrol et
-                if "vulnerability" in self._helpers.bytesToString(attack_response.getResponse()):
-                    issues.append(self.create_issue(baseRequestResponse, endpoint["path"], "Active Swagger Scan"))
-
-        return issues
-
-    def find_and_parse_swagger(self, host_or_url):
-        print("[Dynamic Swagger Scanner] Searching for Swagger JSON on {}".format(host_or_url))
-
-        possible_paths = [
+    def find_and_parse_swagger(self, host):
+        paths = [
             "/swagger.json",
             "/openapi.json",
             "/v2/api-docs",
@@ -71,117 +36,92 @@ class BurpExtender(IBurpExtender, IScannerCheck):
             "/documentation/openapi.json",
             "/documentation/api-docs"
         ]
-
-        for path in possible_paths:
-            url = "https://{}{}".format(host_or_url, path)
+        for path in paths:
+            url = "https://{}{}".format(host, path)
             response = self.fetch_url(url)
             if response:
+                lower_resp = response.lower()
                 if self.is_json(response):
                     try:
                         swagger_data = json.loads(response)
-                        endpoints = self.parse_swagger(swagger_data)
-                        self.swagger_endpoints[host_or_url] = endpoints
-                        print("[Dynamic Swagger Scanner] Found Swagger JSON at {}".format(url))
-
-                        # Create an issue when Swagger JSON is found
+                        eps = self.parse_swagger(swagger_data)
+                        self.swagger_endpoints[host] = eps
                         self.create_issue_manual(
-                            url, "Swagger Endpoint Found",
+                            url,
+                            "Swagger Endpoint Found",
                             "The Swagger JSON endpoint at {} exposes API documentation.".format(url),
                             "Medium"
                         )
-                        return
-                    except Exception as e:
-                        print("[Dynamic Swagger Scanner] Error parsing JSON at {}: {}".format(url, e))
-                elif "swagger" in response.lower():
-                    print("[Dynamic Swagger Scanner] Found possible Swagger documentation at: {}".format(url))
-
-                    # Create an issue when Swagger documentation is found
+                    except:
+                        pass
+                elif "swagger" in lower_resp:
                     self.create_issue_manual(
-                        url, "Possible Swagger Documentation Found",
+                        url,
+                        "Possible Swagger Documentation Found",
                         "The endpoint at {} might expose Swagger documentation.".format(url),
                         "Medium"
                     )
-                else:
-                    print("[Dynamic Swagger Scanner] Non-JSON content found at: {}".format(url))
-
-        print("[Dynamic Swagger Scanner] No Swagger JSON found on {}".format(host_or_url))
 
     def create_issue_manual(self, url, issue_name, issue_detail, severity):
-        """Burp Suite'te manuel bir issue oluştur."""
-        if url in self.created_issues:
-            print("[Dynamic Swagger Scanner] Duplicate issue ignored for: {}".format(url))
-            return  # Duplicate kontrolü: Aynı URL için issue oluşturma
-
         try:
-            # Create HTTP service
             parsed_url = URL(url)
             host = parsed_url.getHost()
+            path = parsed_url.getPath() or ""
             port = 443 if parsed_url.getProtocol() == "https" else 80
             http_service = self._helpers.buildHttpService(host, port, parsed_url.getProtocol() == "https")
-
-            # Create an issue
+            req = "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: DynamicSwaggerScanner/1.0\r\nAccept: application/json\r\nConnection: close\r\n\r\n".format(path, host)
+            byte_req = self._helpers.stringToBytes(req)
+            resp = self._callbacks.makeHttpRequest(http_service, byte_req)
+            resp_bytes = resp.getResponse()
+            info = self._helpers.analyzeResponse(resp_bytes)
+            body = self._helpers.bytesToString(resp_bytes)[info.getBodyOffset():]
+            markers = []
+            lw = body.lower()
+            if "swagger" in lw:
+                idx = lw.index("swagger")
+                end_idx = idx + len("swagger")
+                markers.append(array('i', [info.getBodyOffset() + idx, info.getBodyOffset() + end_idx]))
+            marked = self._callbacks.applyMarkers(resp, None, markers)
             issue = CustomScanIssue(
-                httpService=http_service,
-                url=parsed_url,  # URL nesnesi doğrudan kullanılabilir
-                httpMessages=[],  # İlgili HTTP mesajı yok
-                name=issue_name,
-                detail=issue_detail,
-                severity=severity
+                http_service,
+                parsed_url,
+                [marked],
+                issue_name,
+                issue_detail,
+                severity
             )
             self._callbacks.addScanIssue(issue)
-            self.created_issues.append(url)
-            print("[Dynamic Swagger Scanner] Issue created: {} at {}".format(issue_name, url))
-        except Exception as e:
-            print("[Dynamic Swagger Scanner] Error creating issue for {}: {}".format(url, e))
-
-    def is_json(self, response):
-        try:
-            json.loads(response)
-            return True
-        except ValueError:
-            return False
+        except:
+            pass
 
     def fetch_url(self, url):
         try:
-            print("[Debug] Fetching URL: {}".format(url))
-
-            # Separate URL parts
             parsed_url = URL(url)
             host = parsed_url.getHost()
             path = parsed_url.getPath() or "/"
-
-            # Manually create the HTTP request
-            http_request = "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n".format(path, host)
-            byte_request = self._helpers.stringToBytes(http_request)
-
-            # Make HTTP request with Burp API
-            http_service = self._helpers.buildHttpService(host, 443, True)
-            response = self._callbacks.makeHttpRequest(http_service, byte_request)
-
-            # Return the response
-            return self._helpers.bytesToString(response.getResponse())
-        except Exception as e:
-            print("[Dynamic Swagger Scanner] Error fetching {}: {}".format(url, e))
+            port = 443 if parsed_url.getProtocol() == "https" else 80
+            http_service = self._helpers.buildHttpService(host, port, parsed_url.getProtocol() == "https")
+            req = "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: DynamicSwaggerScanner/1.0\r\nAccept: application/json\r\nConnection: close\r\n\r\n".format(path, host)
+            byte_req = self._helpers.stringToBytes(req)
+            resp = self._callbacks.makeHttpRequest(http_service, byte_req)
+            return self._helpers.bytesToString(resp.getResponse())
+        except:
             return None
 
     def parse_swagger(self, swagger_data):
-        endpoints = []
-        for path, methods in swagger_data.get("paths", {}).items():
-            for method in methods.keys():
-                endpoints.append({"path": path, "method": method.upper()})
-        print("[Dynamic Swagger Scanner] Parsed endpoints: {}".format(endpoints))
-        return endpoints
+        eps = []
+        p_obj = swagger_data.get("paths", {})
+        for p, methods in p_obj.items():
+            for m in methods.keys():
+                eps.append({"path": p, "method": m.upper()})
+        return eps
 
-    def create_issue(self, baseRequestResponse, endpoint, issue_name):
-        return CustomScanIssue(
-            baseRequestResponse.getHttpService(),
-            self._helpers.analyzeRequest(baseRequestResponse).getUrl(),
-            [baseRequestResponse],
-            "{} at {}".format(issue_name, endpoint),
-            "The endpoint {} may be vulnerable.".format(endpoint),
-            "Information"
-        )
-
+    def is_json(self, r):
+        try:
+            json.loads(r)
+            return True
+        except:
+            return False
 
 class CustomScanIssue(IScanIssue):
     def __init__(self, httpService, url, httpMessages, name, detail, severity):
@@ -199,7 +139,7 @@ class CustomScanIssue(IScanIssue):
         return self._name
 
     def getIssueType(self):
-        return 0
+        return 0x08000003
 
     def getSeverity(self):
         return self._severity
@@ -208,16 +148,16 @@ class CustomScanIssue(IScanIssue):
         return "Certain"
 
     def getIssueBackground(self):
-        return None
+        return "Publicly accessible Swagger/OpenAPI documentation can reveal internal endpoints."
 
     def getRemediationBackground(self):
-        return None
+        return "Restrict or remove access to Swagger/OpenAPI docs in production."
 
     def getIssueDetail(self):
         return self._detail
 
     def getRemediationDetail(self):
-        return None
+        return "Ensure these sensitive API docs are not publicly accessible."
 
     def getHttpMessages(self):
         return self._httpMessages
