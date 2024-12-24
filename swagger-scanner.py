@@ -42,8 +42,8 @@ class BurpExtender(IBurpExtender, IScannerCheck):
         if path == "/" or not path:
             for guess in guess_paths:
                 full_url = "https://{}{}".format(host, guess)
-                resp = self.fetch_url(full_url)
-                if resp:
+                status_code, resp = self.fetch_url(full_url)
+                if status_code == 200 and resp:
                     lower_resp = resp.lower()
                     if self.is_json(resp):
                         try:
@@ -81,8 +81,8 @@ class BurpExtender(IBurpExtender, IScannerCheck):
             for url in combined_urls:
                 if host in self.found_swaggers:
                     return
-                resp = self.fetch_url(url)
-                if resp:
+                status_code, resp = self.fetch_url(url)
+                if status_code == 200 and resp:
                     lower_resp = resp.lower()
                     if self.is_json(resp):
                         try:
